@@ -406,12 +406,12 @@ async function uploadPDF() {
   } catch(e) { showToast('Upload failed — is the server running?', 'error'); return; }
   if (!uploadResp.ok) { showToast(uploadData.detail || 'Upload failed', 'error'); return; }
   const jobId = uploadData.job_id;
-  showToast('Processing PDF... please wait ⏳', 'info');
+  showToast('Processing PDF — extracting text from pages... ⏳', 'info');
   let attempts = 0;
   const poll = setInterval(async () => {
     attempts++;
     try {
-      const jr = await fetch(API + '/admin/job/' + jobId);
+      const jr = await fetch(API + '/admin/job/' + jobId, {signal: AbortSignal.timeout(10000)});
       if (!jr.ok) { clearInterval(poll); showToast('Could not check job status', 'error'); return; }
       const jd = await jr.json();
       if (jd.status === 'done') {
@@ -424,12 +424,23 @@ async function uploadPDF() {
         loadFiles();
       } else if (jd.status === 'error') {
         clearInterval(poll);
-        showToast('Error: ' + (jd.error || 'Processing failed'), 'error');
-      } else if (attempts >= 60) {
-        clearInterval(poll);
-        showToast('Timed out. Check Render logs.', 'error');
+        showToast('❌ Error: ' + (jd.error || 'Processing failed'), 'error');
+      } else if (jd.status === 'processing') {
+        // Show live progress
+        const chunksNow = jd.chunks || 0;
+        if (chunksNow > 0) {
+          showToast('⏳ Embedding chunks... ' + chunksNow + ' done so far', 'info');
+        } else if (attempts > 5) {
+          showToast('⏳ Extracting text from pages...', 'info');
+        }
+        if (attempts >= 200) {  // 10 minutes max
+          clearInterval(poll);
+          showToast('⚠️ Timed out waiting. Check Render logs — job may still be running.', 'error');
+        }
       }
-    } catch(e) {}
+    } catch(e) {
+      console.warn('Poll error:', e);
+    }
   }, 3000);
 }
 

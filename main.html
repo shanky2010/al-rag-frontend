@@ -299,17 +299,29 @@ function parseOutput(text) {
   const out = { summary:'', causes:[], steps:[], safety:'' };
   let sec = null;
   text.split('\n').forEach(raw => {
-    const line  = raw.trim();
-    const upper = line.toUpperCase();
+    const line  = raw.trim().replace(/\*\*/g, ''); // strip markdown bold **
     if (!line) return;
-    if (upper.includes('PROBLEM SUMMARY'))   { sec = 'summary'; return; }
-    if (upper.includes('POSSIBLE CAUSES'))   { sec = 'causes';  return; }
-    if (upper.includes('CORRECTIVE ACTION') || upper.includes('STEP-BY-STEP')) { sec = 'steps'; return; }
-    if (upper.includes('SAFETY'))            { sec = 'safety';  return; }
-    if (sec === 'summary') out.summary += line + ' ';
-    else if (sec === 'causes') { const c = line.replace(/^[\d.)-]+\s*/, '').trim(); if (c) out.causes.push(c); }
-    else if (sec === 'steps')  { const s = line.replace(/^[\d.)-]+\s*/, '').trim(); if (s) out.steps.push(s); }
-    else if (sec === 'safety') out.safety += line + ' ';
+    const upper = line.toUpperCase();
+
+    // Detect section headers (handle trailing colons, bold, etc.)
+    if (upper.startsWith('PROBLEM SUMMARY'))                                           { sec = 'summary'; return; }
+    if (upper.startsWith('POSSIBLE CAUSES'))                                           { sec = 'causes';  return; }
+    if (upper.startsWith('STEP-BY-STEP') || upper.startsWith('CORRECTIVE ACTION') ||
+        upper.startsWith('STEP BY STEP'))                                              { sec = 'steps';   return; }
+    if (upper.startsWith('SAFETY NOTE') || upper.startsWith('SAFETY:') ||
+        upper === 'SAFETY')                                                            { sec = 'safety';  return; }
+
+    if (sec === 'summary') {
+      out.summary += (out.summary ? ' ' : '') + line;
+    } else if (sec === 'causes') {
+      const c = line.replace(/^[\d]+[.):\-\s]+/, '').trim();
+      if (c) out.causes.push(c);
+    } else if (sec === 'steps') {
+      const s = line.replace(/^[\d]+[.):\-\s]+/, '').trim();
+      if (s) out.steps.push(s);
+    } else if (sec === 'safety') {
+      out.safety += (out.safety ? ' ' : '') + line.replace(/^[-•*]\s*/, '');
+    }
   });
   out.summary = out.summary.trim();
   out.safety  = out.safety.trim();

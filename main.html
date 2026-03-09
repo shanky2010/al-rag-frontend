@@ -145,6 +145,18 @@ let _toastTimer;
 
 const API = 'https://al-rag-backend.onrender.com';
 
+// ── Wake up Render backend on page load ───────────────────────────────────────
+(async function wakeUp() {
+  try {
+    showToast('Connecting to server...', 'info');
+    const r = await fetch(API + '/health', { signal: AbortSignal.timeout(60000) });
+    const d = await r.json();
+    if (d.status === 'ok') showToast('Server ready ✅', 'success');
+  } catch(e) {
+    showToast('Server starting up, please wait...', 'error');
+  }
+})();
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 const role     = localStorage.getItem('currentRole') || 'user';
 const userName = localStorage.getItem('currentUser') || 'User';
@@ -217,7 +229,8 @@ async function submitQuery() {
     const qr = await fetch(API + '/query', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ query, machine_name: machine })
+      body: JSON.stringify({ query, machine_name: machine }),
+      signal: AbortSignal.timeout(60000)
     });
     const qd = await qr.json();
     const results = qd.results || [];
@@ -233,7 +246,8 @@ async function submitQuery() {
     const fr = await fetch(API + '/format', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ context: res.context, query, machine: res.machine })
+      body: JSON.stringify({ context: res.context, query, machine: res.machine }),
+      signal: AbortSignal.timeout(60000)
     });
     const fd = await fr.json();
     const parsed = parseOutput(fd.formatted || '');
@@ -383,24 +397,45 @@ async function uploadPDF() {
   const file    = document.getElementById('pdfFile').files[0];
   if (!machine) { showToast('Enter machine name', 'error'); return; }
   if (!file)    { showToast('Select a PDF file', 'error');  return; }
-  showToast('Uploading and indexing...', 'info');
+  showToast('Uploading PDF...', 'info');
   const fd = new FormData();
   fd.append('machine_name', machine);
   fd.append('file', file);
   try {
-    const r = await fetch(API + '/admin/upload/pdf', { method: 'POST', body: fd });
+    const r = await fetch(API + '/admin/upload/pdf', {
+      method: 'POST', body: fd,
+      signal: AbortSignal.timeout(30000)
+    });
     const d = await r.json();
-    if (r.ok) {
-      showToast(`Indexed ${d.chunks_stored} chunks from ${file.name}`, 'success');
-      document.getElementById('pdfMachine').value = '';
-      document.getElementById('pdfFile').value = '';
-      document.getElementById('pdfLabel').className = 'file-drop-label';
-      document.getElementById('pdfLabel').textContent = '📄  Choose PDF file';
-      loadFiles();
-    } else {
-      showToast(d.detail || 'Upload failed', 'error');
-    }
-  } catch(e) { showToast('Backend offline', 'error'); }
+    if (!r.ok) { showToast(d.detail || 'Upload failed', 'error'); return; }
+
+    // Poll for job completion
+    const jobId = d.job_id;
+    showToast('Processing PDF... this may take 30-60 seconds ⏳', 'info');
+    let attempts = 0;
+    const poll = setInterval(async () => {
+      attempts++;
+      try {
+        const jr = await fetch(API + '/admin/job/' + jobId);
+        const jd = await jr.json();
+        if (jd.status === 'done') {
+          clearInterval(poll);
+          showToast(`✅ Indexed ${jd.chunks} chunks from ${file.name}`, 'success');
+          document.getElementById('pdfMachine').value = '';
+          document.getElementById('pdfFile').value = '';
+          document.getElementById('pdfLabel').className = 'file-drop-label';
+          document.getElementById('pdfLabel').textContent = '📄  Choose PDF file';
+          loadFiles();
+        } else if (jd.status === 'error') {
+          clearInterval(poll);
+          showToast('Processing failed: ' + (jd.error || 'Unknown error'), 'error');
+        } else if (attempts > 40) {
+          clearInterval(poll);
+          showToast('Timed out waiting for processing', 'error');
+        }
+      } catch(e) { /* keep polling */ }
+    }, 3000); // poll every 3 seconds
+  } catch(e) { showToast('Upload failed — backend may be starting up, try again', 'error'); }
 }
 
 async function uploadExcel() {

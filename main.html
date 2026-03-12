@@ -195,8 +195,15 @@ function startMic() {
 // ── Machines ──────────────────────────────────────────────────────────────────
 async function loadMachines() {
   try {
-    const r = await fetch(API + '/admin/machines');
-    if (!r.ok) return;
+    // Retry to handle Render cold start
+    let r;
+    for (let i = 0; i < 5; i++) {
+      r = await fetch(API + '/admin/machines').catch(() => null);
+      if (r && r.ok) break;
+      if (i === 0) showToast('Backend waking up, please wait...', 'info');
+      await new Promise(res => setTimeout(res, 8000));
+    }
+    if (!r || !r.ok) return;
     const d = await r.json();
     const sel = document.getElementById('machineSelect');
     sel.innerHTML = '<option value="all">All Machines</option>';
@@ -463,8 +470,15 @@ async function uploadExcel() {
 
 async function loadFiles() {
   try {
-    const r = await fetch(API + '/admin/stats');
-    if (!r.ok) return;
+    // Retry up to 5 times to handle Render cold start (502)
+    let r;
+    for (let i = 0; i < 5; i++) {
+      r = await fetch(API + '/admin/stats').catch(() => null);
+      if (r && r.ok) break;
+      if (i === 0) showToast('Backend waking up, please wait...', 'info');
+      await new Promise(res => setTimeout(res, 8000));
+    }
+    if (!r || !r.ok) return;
     const d = await r.json();
     const el = document.getElementById('fileList');
     const files = d.files || [];

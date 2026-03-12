@@ -145,16 +145,6 @@ let _toastTimer;
 
 const API = 'https://al-rag-backend.onrender.com';
 
-// Wake backend on page load (Render free tier sleeps after 15 min)
-(async () => {
-  try {
-    showToast('Connecting to server...', 'info');
-    const r = await fetch(API + '/health', { signal: AbortSignal.timeout(60000) });
-    const d = await r.json();
-    if (d.status === 'ok') showToast('Server ready ✅', 'success');
-  } catch(e) { showToast('Server waking up, please wait 30s...', 'error'); }
-})();
-
 // ── Init ─────────────────────────────────────────────────────────────────────
 const role     = localStorage.getItem('currentRole') || 'user';
 const userName = localStorage.getItem('currentUser') || 'User';
@@ -227,8 +217,7 @@ async function submitQuery() {
     const qr = await fetch(API + '/query', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ query, machine_name: machine }),
-      signal: AbortSignal.timeout(60000)
+      body: JSON.stringify({ query, machine_name: machine })
     });
     const qd = await qr.json();
     const results = qd.results || [];
@@ -244,8 +233,7 @@ async function submitQuery() {
     const fr = await fetch(API + '/format', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ context: res.context, query, machine: res.machine }),
-      signal: AbortSignal.timeout(60000)
+      body: JSON.stringify({ context: res.context, query, machine: res.machine })
     });
     const fd = await fr.json();
     const parsed = parseOutput(fd.formatted || '');
@@ -299,29 +287,17 @@ function parseOutput(text) {
   const out = { summary:'', causes:[], steps:[], safety:'' };
   let sec = null;
   text.split('\n').forEach(raw => {
-    const line  = raw.trim().replace(/\*\*/g, ''); // strip markdown bold **
-    if (!line) return;
+    const line  = raw.trim();
     const upper = line.toUpperCase();
-
-    // Detect section headers (handle trailing colons, bold, etc.)
-    if (upper.startsWith('PROBLEM SUMMARY'))                                           { sec = 'summary'; return; }
-    if (upper.startsWith('POSSIBLE CAUSES'))                                           { sec = 'causes';  return; }
-    if (upper.startsWith('STEP-BY-STEP') || upper.startsWith('CORRECTIVE ACTION') ||
-        upper.startsWith('STEP BY STEP'))                                              { sec = 'steps';   return; }
-    if (upper.startsWith('SAFETY NOTE') || upper.startsWith('SAFETY:') ||
-        upper === 'SAFETY')                                                            { sec = 'safety';  return; }
-
-    if (sec === 'summary') {
-      out.summary += (out.summary ? ' ' : '') + line;
-    } else if (sec === 'causes') {
-      const c = line.replace(/^[\d]+[.):\-\s]+/, '').trim();
-      if (c) out.causes.push(c);
-    } else if (sec === 'steps') {
-      const s = line.replace(/^[\d]+[.):\-\s]+/, '').trim();
-      if (s) out.steps.push(s);
-    } else if (sec === 'safety') {
-      out.safety += (out.safety ? ' ' : '') + line.replace(/^[-•*]\s*/, '');
-    }
+    if (!line) return;
+    if (upper.includes('PROBLEM SUMMARY'))   { sec = 'summary'; return; }
+    if (upper.includes('POSSIBLE CAUSES'))   { sec = 'causes';  return; }
+    if (upper.includes('CORRECTIVE ACTION') || upper.includes('STEP-BY-STEP')) { sec = 'steps'; return; }
+    if (upper.includes('SAFETY'))            { sec = 'safety';  return; }
+    if (sec === 'summary') out.summary += line + ' ';
+    else if (sec === 'causes') { const c = line.replace(/^[\d.)-]+\s*/, '').trim(); if (c) out.causes.push(c); }
+    else if (sec === 'steps')  { const s = line.replace(/^[\d.)-]+\s*/, '').trim(); if (s) out.steps.push(s); }
+    else if (sec === 'safety') out.safety += line + ' ';
   });
   out.summary = out.summary.trim();
   out.safety  = out.safety.trim();
@@ -402,58 +378,57 @@ function setFileLabel(labelId, inputId) {
   }
 }
 
+async function pollJob(jobId, successMsg, onDone) {
+  // Poll every 3 seconds until done or error
+  for (let i = 0; i < 200; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const r = await fetch(`${API}/admin/job/${encodeURIComponent(jobId)}`);
+      const d = await r.json();
+      if (d.status === 'done') {
+        showToast(successMsg(d), 'success');
+        onDone();
+        loadFiles();
+        return;
+      } else if (d.status === 'error') {
+        showToast('Indexing failed: ' + d.detail, 'error');
+        return;
+      }
+      // still indexing — keep polling
+    } catch(e) {
+      showToast('Cannot reach backend', 'error');
+      return;
+    }
+  }
+  showToast('Indexing timed out (10 min) — check Render logs', 'error');
+}
+
 async function uploadPDF() {
   const machine = document.getElementById('pdfMachine').value.trim();
   const file    = document.getElementById('pdfFile').files[0];
   if (!machine) { showToast('Enter machine name', 'error'); return; }
   if (!file)    { showToast('Select a PDF file', 'error');  return; }
+  showToast('Uploading...', 'info');
   const fd = new FormData();
   fd.append('machine_name', machine);
   fd.append('file', file);
-  showToast('Uploading PDF...', 'info');
-  let uploadResp, uploadData;
   try {
-    uploadResp = await fetch(API + '/admin/upload/pdf', { method: 'POST', body: fd });
-    uploadData = await uploadResp.json();
-  } catch(e) { showToast('Upload failed — is the server running?', 'error'); return; }
-  if (!uploadResp.ok) { showToast(uploadData.detail || 'Upload failed', 'error'); return; }
-  const jobId = uploadData.job_id;
-  showToast('Processing PDF — extracting text from pages... ⏳', 'info');
-  let attempts = 0;
-  const poll = setInterval(async () => {
-    attempts++;
-    try {
-      const jr = await fetch(API + '/admin/job/' + jobId, {signal: AbortSignal.timeout(10000)});
-      if (!jr.ok) { clearInterval(poll); showToast('Could not check job status', 'error'); return; }
-      const jd = await jr.json();
-      if (jd.status === 'done') {
-        clearInterval(poll);
-        showToast('✅ Indexed ' + jd.chunks + ' chunks from ' + file.name, 'success');
-        document.getElementById('pdfMachine').value = '';
-        document.getElementById('pdfFile').value = '';
-        document.getElementById('pdfLabel').className = 'file-drop-label';
-        document.getElementById('pdfLabel').textContent = '📄  Choose PDF file';
-        loadFiles();
-      } else if (jd.status === 'error') {
-        clearInterval(poll);
-        showToast('❌ Error: ' + (jd.error || 'Processing failed'), 'error');
-      } else if (jd.status === 'processing') {
-        // Show live progress
-        const chunksNow = jd.chunks || 0;
-        if (chunksNow > 0) {
-          showToast('⏳ Embedding chunks... ' + chunksNow + ' done so far', 'info');
-        } else if (attempts > 5) {
-          showToast('⏳ Extracting text from pages...', 'info');
-        }
-        if (attempts >= 200) {  // 10 minutes max
-          clearInterval(poll);
-          showToast('⚠️ Timed out waiting. Check Render logs — job may still be running.', 'error');
-        }
-      }
-    } catch(e) {
-      console.warn('Poll error:', e);
+    const r = await fetch(API + '/admin/upload/pdf', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (r.status === 202 || r.ok) {
+      document.getElementById('pdfMachine').value = '';
+      document.getElementById('pdfFile').value = '';
+      document.getElementById('pdfLabel').className = 'file-drop-label';
+      document.getElementById('pdfLabel').textContent = '📄  Choose PDF file';
+      showToast('Uploaded! Indexing in background...', 'info');
+      pollJob(d.job_id,
+        d => `✅ Indexed ${d.chunks} chunks from ${file.name}`,
+        () => {}
+      );
+    } else {
+      showToast(d.detail || 'Upload failed', 'error');
     }
-  }, 3000);
+  } catch(e) { showToast('Backend offline', 'error'); }
 }
 
 async function uploadExcel() {
@@ -461,25 +436,30 @@ async function uploadExcel() {
   const file    = document.getElementById('xlsFile').files[0];
   if (!machine) { showToast('Enter machine name', 'error'); return; }
   if (!file)    { showToast('Select a file', 'error');       return; }
-  showToast('Uploading and indexing...', 'info');
+  showToast('Uploading...', 'info');
   const fd = new FormData();
   fd.append('machine_name', machine);
   fd.append('file', file);
   try {
     const r = await fetch(API + '/admin/upload/excel', { method: 'POST', body: fd });
     const d = await r.json();
-    if (r.ok) {
-      showToast(`Indexed ${d.rows_stored} rows`, 'success');
+    if (r.status === 202 || r.ok) {
       document.getElementById('xlsMachine').value = '';
       document.getElementById('xlsFile').value = '';
       document.getElementById('xlsLabel').className = 'file-drop-label';
       document.getElementById('xlsLabel').textContent = '📊  Choose Excel / CSV file';
-      loadFiles();
+      showToast('Uploaded! Indexing in background...', 'info');
+      pollJob(d.job_id,
+        d => `✅ Indexed ${d.chunks} rows from ${file.name}`,
+        () => {}
+      );
     } else {
       showToast(d.detail || 'Upload failed', 'error');
     }
   } catch(e) { showToast('Backend offline', 'error'); }
 }
+
+
 
 async function loadFiles() {
   try {
